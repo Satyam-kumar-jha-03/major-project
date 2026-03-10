@@ -66,74 +66,136 @@ class AIModelPredictor:
         """Initialize the trained model for predictions"""
         print("🔧 Loading AI Model...")
         
-        # Get absolute paths
-        current_dir = Path(__file__).parent
-        project_root = current_dir.parent
+        # Get absolute paths - FIXED: More robust path handling
+        current_dir = Path(__file__).parent.absolute()
+        project_root = current_dir.parent.absolute()
         models_dir = project_root / "models"
         
+        print(f"📁 Looking for models in: {models_dir}")
+        
+        # Check if models directory exists
+        if not models_dir.exists():
+            print(f"❌ Models directory not found at: {models_dir}")
+            print("Creating models directory...")
+            models_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Define model paths
         self.model_path = models_dir / "image_classifier.keras"
         self.config_path = models_dir / "model_config.json"
         self.vocab_path = models_dir / "label_vocabulary.json"
         
+        # List all files in models directory for debugging
+        if models_dir.exists():
+            print(f"📂 Files in {models_dir}:")
+            for f in models_dir.glob("*"):
+                print(f"   - {f.name}")
+        
         try:
             # Check if model files exist
-            if not all(path.exists() for path in [self.model_path, self.config_path, self.vocab_path]):
-                print("❌ Model files not found. Please train the model first.")
-                print(f"Looking for:")
-                print(f"  - Model: {self.model_path}")
-                print(f"  - Config: {self.config_path}")
-                print(f"  - Vocabulary: {self.vocab_path}")
+            if not self.model_path.exists():
+                print(f"❌ Model file not found at: {self.model_path}")
+                print("Please train the model first by running train.py")
+                print("\nTo train the model:")
+                print("1. Make sure you have dataset in ../dataset/train/")
+                print("2. Run: python train.py")
+                print("3. Wait for training to complete")
+                print(f"4. Model will be saved to: {self.model_path}")
                 self.model = None
                 self.feature_extractor = None
                 return
             
             # Load the trained model
+            print(f"📥 Loading model from: {self.model_path}")
             self.model = keras.models.load_model(str(self.model_path))
             print("✅ Model loaded successfully")
             
             # Load configuration
-            with open(self.config_path, 'r') as f:
-                self.config = json.load(f)
-            print("✅ Config loaded successfully")
+            if self.config_path.exists():
+                with open(self.config_path, 'r') as f:
+                    self.config = json.load(f)
+                print("✅ Config loaded successfully")
+                
+                # Get model type from config
+                self.model_type = self.config.get('model_type', 'medium_dataset')
+                print(f"📊 Model type: {self.model_type}")
+            else:
+                print("⚠️ Config file not found, using defaults")
+                self.config = {
+                    'img_size': 224,
+                    'num_features': 2048,
+                    'max_seq_length': 1
+                }
+                self.model_type = 'medium_dataset'
             
             # Load class vocabulary
-            with open(self.vocab_path, 'r') as f:
-                self.class_names = json.load(f)
-            print("✅ Class vocabulary loaded successfully")
+            if self.vocab_path.exists():
+                with open(self.vocab_path, 'r') as f:
+                    self.class_names = json.load(f)
+                print(f"✅ Class vocabulary loaded: {self.class_names}")
+            else:
+                print("⚠️ Vocabulary file not found, using defaults")
+                self.class_names = ['REAL', 'FAKE']
             
-            # Build feature extractor
+            # Build feature extractor based on model type
             self.feature_extractor = self.build_feature_extractor()
-            print("✅ Feature extractor built successfully")
+            
+            if self.feature_extractor is None:
+                print("❌ Failed to build feature extractor")
+                self.model = None
+                return
             
             self.img_size = (self.config.get('img_size', 224), self.config.get('img_size', 224))
             self.num_features = self.config.get('num_features', 2048)
             self.max_seq_length = self.config.get('max_seq_length', 1)
             
-            print(f"🎯 Model ready. Classes: {self.class_names}")
+            print(f"🎯 Model ready! Can detect: {self.class_names}")
             
         except Exception as e:
             print(f"❌ Error loading model: {e}")
+            import traceback
+            traceback.print_exc()
             self.model = None
             self.feature_extractor = None
     
     def build_feature_extractor(self):
-        """Build the feature extractor used during training"""
+        """Build the appropriate feature extractor based on model type"""
         try:
-            feature_extractor = keras.applications.ResNet50(
-                weights="imagenet",
-                include_top=False,
-                pooling="avg",
-                input_shape=(224, 224, 3),
-            )
+            print(f"🔨 Building feature extractor for {self.model_type}...")
+            
+            # Choose feature extractor based on model type (matching train.py)
+            if self.model_type in ['small_dataset', 'video_sequence']:
+                # Use InceptionV3 for smaller datasets
+                feature_extractor = keras.applications.InceptionV3(
+                    weights="imagenet",
+                    include_top=False,
+                    pooling="avg",
+                    input_shape=(224, 224, 3),
+                )
+                self.preprocess_input = keras.applications.inception_v3.preprocess_input
+                print("   Using InceptionV3 feature extractor")
+            else:
+                # Use ResNet50 for medium/large datasets
+                feature_extractor = keras.applications.ResNet50(
+                    weights="imagenet",
+                    include_top=False,
+                    pooling="avg",
+                    input_shape=(224, 224, 3),
+                )
+                self.preprocess_input = keras.applications.resnet50.preprocess_input
+                print("   Using ResNet50 feature extractor")
             
             feature_extractor.trainable = False
             
             inputs = keras.Input((224, 224, 3))
-            preprocessed = keras.applications.resnet50.preprocess_input(inputs)
+            preprocessed = self.preprocess_input(inputs)
             outputs = feature_extractor(preprocessed)
+            
             return keras.Model(inputs, outputs, name="feature_extractor")
+            
         except Exception as e:
             print(f"❌ Error building feature extractor: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def load_and_preprocess_image(self, image_path):
@@ -143,8 +205,8 @@ class AIModelPredictor:
             image = image.resize(self.img_size)
             image = np.array(image, dtype=np.float32)
             
-            # Use ResNet50 preprocessing
-            image = keras.applications.resnet50.preprocess_input(image)
+            # Use the correct preprocessing function
+            image = self.preprocess_input(image)
             return image
         except Exception as e:
             print(f"❌ Error loading image {image_path}: {e}")
@@ -153,6 +215,10 @@ class AIModelPredictor:
     def extract_features(self, image_path):
         """Extract features using the feature extractor"""
         try:
+            if self.feature_extractor is None:
+                print("❌ Feature extractor not available")
+                return None
+                
             image = self.load_and_preprocess_image(image_path)
             if image is None:
                 return None
@@ -165,6 +231,8 @@ class AIModelPredictor:
             
         except Exception as e:
             print(f"❌ Feature extraction error: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def predict_image(self, image_path):
@@ -182,14 +250,21 @@ class AIModelPredictor:
             # Extract features
             features = self.extract_features(image_path)
             if features is None:
+                print("⚠️ Feature extraction failed, using fallback")
                 return self.fallback_prediction()
             
-            # Reshape features to match model input (if needed)
+            # Reshape features to match model input
             if len(features.shape) == 1:
                 features = features.reshape(1, -1)
             
-            # Predict using the trained model
-            probabilities = self.model.predict(features, verbose=0)[0]
+            # For video sequence model, we need to add sequence dimension
+            if self.model_type == 'video_sequence':
+                features = features[:, np.newaxis, :]
+                mask = np.ones((1, self.max_seq_length), dtype="bool")
+                probabilities = self.model.predict([features, mask], verbose=0)[0]
+            else:
+                # Predict using the trained model
+                probabilities = self.model.predict(features, verbose=0)[0]
             
             # Get results
             result = {}
@@ -206,7 +281,7 @@ class AIModelPredictor:
             elif 'real' in predicted_class.lower() or 'human' in predicted_class.lower():
                 is_ai = False
             else:
-                # Default: assume first class is REAL, second is FAKE
+                # Default: assume second class (index 1) is FAKE/AI
                 is_ai = np.argmax(probabilities) == 1
             
             print(f"🔍 Prediction: {predicted_class} (AI: {is_ai}) with {confidence:.2f}% confidence")
@@ -227,12 +302,10 @@ class AIModelPredictor:
     
     def predict_video(self, video_path, frame_interval=30):
         """Predict if video is AI or Human generated by analyzing frames"""
-        # If in DEMO MODE, return random results
         if DEMO_MODE:
             return self.demo_video_prediction()
         
         try:
-            # If model is not loaded, return fallback result
             if self.model is None or self.feature_extractor is None:
                 return self.fallback_video_prediction()
             
@@ -318,35 +391,28 @@ class AIModelPredictor:
             print(f"❌ Video analysis error: {e}")
             return self.fallback_video_prediction()
     
-    # Demo mode methods (from newapp.py)
     def demo_prediction(self):
         """Return random prediction for demo mode"""
         print("🎲 DEMO MODE: Using random prediction")
-        is_ai = random.random() > 0.6  # 60% human, 40% AI
+        is_ai = random.random() > 0.6
         confidence = random.uniform(75.0, 95.0)
         
-        # Create realistic probabilities
+        real_class = self.class_names[0] if self.class_names and len(self.class_names) > 0 else "REAL"
+        fake_class = self.class_names[1] if self.class_names and len(self.class_names) > 1 else "FAKE"
+        
         if is_ai:
             ai_prob = confidence / 100.0
             human_prob = 1.0 - ai_prob
+            predicted_class = fake_class
         else:
             human_prob = confidence / 100.0
             ai_prob = 1.0 - human_prob
-        
-        # Determine class names
-        if hasattr(self, 'class_names') and self.class_names and len(self.class_names) >= 2:
-            real_class = self.class_names[0]
-            fake_class = self.class_names[1]
-        else:
-            real_class = "REAL"
-            fake_class = "FAKE"
+            predicted_class = real_class
         
         result = {
             real_class: human_prob * 100,
             fake_class: ai_prob * 100
         }
-        
-        predicted_class = fake_class if is_ai else real_class
         
         print(f"   Result: {predicted_class} with {confidence:.2f}% confidence")
         
@@ -383,7 +449,6 @@ class AIModelPredictor:
     def fallback_prediction(self):
         """Fallback prediction when model is not available"""
         print("⚠️ Using fallback prediction (model not available)")
-        # If in demo mode, use demo prediction even for fallback
         if DEMO_MODE:
             return self.demo_prediction()
         
@@ -397,7 +462,6 @@ class AIModelPredictor:
     def fallback_video_prediction(self):
         """Fallback video prediction when model is not available"""
         print("⚠️ Using fallback video prediction (model not available)")
-        # If in demo mode, use demo prediction even for fallback
         if DEMO_MODE:
             return self.demo_video_prediction()
         
@@ -417,9 +481,15 @@ def initialize_model():
     global model_predictor
     try:
         model_predictor = AIModelPredictor()
-        return model_predictor.model is not None or DEMO_MODE  # Return True if in demo mode
+        # Return True if model is loaded OR we're in demo mode
+        if DEMO_MODE:
+            print("🎮 Demo mode enabled - using random predictions")
+            return True
+        return model_predictor.model is not None
     except Exception as e:
         print(f"❌ Failed to initialize model: {e}")
+        import traceback
+        traceback.print_exc()
         model_predictor = AIModelPredictor()
         return False
 
@@ -461,7 +531,6 @@ def analyze_video(video_path):
 
 def analyze_text(text_content):
     """Analyze text for AI vs Human content"""
-    # If in DEMO MODE, return random results
     if DEMO_MODE:
         print("🎲 DEMO MODE: Using random text prediction")
         is_ai = random.random() > 0.6
@@ -474,55 +543,45 @@ def analyze_text(text_content):
         word_count = len(text_content.split())
         
         if text_length < 50:
-            # Very short text, hard to determine
             return False, 50.0
         
-        # Calculate basic metrics
         sentences = re.split(r'[.!?]+', text_content)
         sentence_count = len([s for s in sentences if s.strip()])
         
-        # Average sentence length
         avg_sentence_length = word_count / max(sentence_count, 1)
         
-        # Calculate lexical diversity (simple version)
         words = text_content.lower().split()
         unique_words = set(words)
         lexical_diversity = len(unique_words) / max(len(words), 1)
         
-        # Check for common patterns
         ai_indicators = 0
         human_indicators = 0
         
-        # AI text often has very consistent sentence lengths
         sentence_lengths = [len(sent.split()) for sent in sentences if sent.strip()]
         if sentence_lengths:
             sentence_length_variance = np.var(sentence_lengths)
-            if sentence_length_variance < 5:  # Low variance might indicate AI
+            if sentence_length_variance < 5:
                 ai_indicators += 1
             else:
                 human_indicators += 1
         
-        # AI text often has very high lexical diversity
         if lexical_diversity > 0.8:
             ai_indicators += 1
         elif lexical_diversity < 0.5:
             human_indicators += 1
         
-        # Check for repetitive patterns in longer texts
         if text_length > 100:
-            # Simple bigram analysis
             words_lower = text_content.lower().split()
             if len(words_lower) > 2:
                 bigrams = [(words_lower[i], words_lower[i+1]) for i in range(len(words_lower)-1)]
                 unique_bigrams = len(set(bigrams))
                 bigram_ratio = unique_bigrams / max(len(bigrams), 1)
                 
-                if bigram_ratio < 0.7:  # Low bigram diversity might indicate AI
+                if bigram_ratio < 0.7:
                     ai_indicators += 1
                 else:
                     human_indicators += 1
         
-        # Check for formal vs informal language patterns
         formal_words = ['utilization', 'methodology', 'optimization', 'implementation', 'comprehensive']
         informal_words = ['awesome', 'cool', 'uh', 'like', 'you know']
         
@@ -534,7 +593,6 @@ def analyze_text(text_content):
         else:
             human_indicators += 1
         
-        # Determine result based on indicators
         total_indicators = ai_indicators + human_indicators
         if total_indicators == 0:
             return False, 50.0
@@ -567,45 +625,36 @@ def analyze_media():
         media_type = request.form.get('type', 'image')
         
         if media_type == 'text':
-            # Handle text analysis
             text_content = request.form.get('text', '')
             if not text_content.strip():
                 return jsonify({'success': False, 'error': 'No text provided'})
             
-            # Generate unique ID for text analysis
             file_id = str(uuid.uuid4())
             filename = f"text_analysis_{file_id[:8]}.txt"
             file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             
-            # Save text to file
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(text_content)
             
-            # Analyze text
             is_ai, confidence = analyze_text(text_content)
             
         else:
-            # Handle file upload (image/video)
             file = request.files['file']
             if file.filename == '':
                 return jsonify({'success': False, 'error': 'No file selected'})
             
-            # Generate unique filename
             file_id = str(uuid.uuid4())
             file_extension = os.path.splitext(file.filename)[1]
             filename = f"{file_id}{file_extension}"
             file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             
-            # Save file
             file.save(file_path)
             
-            # Analyze based on media type
             if media_type == 'image':
                 is_ai, confidence = analyze_image(file_path)
             else:  # video
                 is_ai, confidence = analyze_video(file_path)
         
-        # Save to database
         try:
             analysis = MediaAnalysis(
                 id=file_id,
@@ -619,7 +668,6 @@ def analyze_media():
             db.session.commit()
         except Exception as db_error:
             print(f"Database error: {db_error}")
-            # Continue even if database fails
         
         return jsonify({
             'success': True,
@@ -645,7 +693,6 @@ def get_history():
 def get_uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
-# Health check endpoint
 @app.route('/health', methods=['GET'])
 def health_check():
     model_status = "loaded" if model_predictor and model_predictor.model is not None else "not loaded"
@@ -657,7 +704,6 @@ def health_check():
         'demo_mode': DEMO_MODE
     })
 
-# Add endpoint to toggle demo mode (optional)
 @app.route('/set_demo_mode/<int:mode>', methods=['POST'])
 def set_demo_mode(mode):
     global DEMO_MODE
@@ -684,7 +730,6 @@ print("🌐 Server running at: http://localhost:5000")
 print("📝 Text analysis:", "Demo Mode" if DEMO_MODE else "Enabled")
 print("🖼️  Image analysis:", "Demo Mode" if DEMO_MODE else "Enabled")
 print("🎥 Video analysis:", "Demo Mode" if DEMO_MODE else "Enabled")
-print("\n💡 Tip: Set DEMO_MODE=true environment variable for random predictions")
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
